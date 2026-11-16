@@ -1,12 +1,17 @@
 import json
 import os
 import shutil
+import logging
+import math
+import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, model_validator
+from hattrick_ai import CalibradorCampo, ExtratorTrajetorias, LeitorVideo
 
 
 class FieldMarks(BaseModel):
@@ -42,6 +47,7 @@ class FieldData(BaseModel):
 
 
 app = FastAPI(title="Hattrick API", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 def storage_root() -> Path:
@@ -53,13 +59,99 @@ def health():
     return {"status": "ok"}
 
 
+def save_metadata(folder: Path, metadata: dict):
+    temporary = folder / "submission.json.tmp"
+    temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(folder / "submission.json")
+
+
+def process_submission(folder: Path):
+    metadata = json.loads((folder / "submission.json").read_text(encoding="utf-8"))
+    try:
+        metadata["status"] = "processing"
+        save_metadata(folder, metadata)
+        video_path = folder / metadata["video_file"]
+        camera_path = folder / "camera.yaml"
+        with LeitorVideo(video_path) as video:
+            info = video.metadados()
+        if metadata["calibration_type"] == "field":
+            field = metadata["field_data"]
+            if (field["width"], field["height"]) != (info.largura, info.altura):
+                raise ValueError("A resolução das marcações não corresponde à do vídeo.")
+            calibrador = CalibradorCampo()
+            marks = calibrador.conectar_linhas(field["marks"])
+            calibrador.calibrar(marks, (info.largura, info.altura)).salvar(camera_path)
+            metadata["camera_file"] = "camera.yaml"
+        dispositivo = os.environ.get("HATTRICK_DEVICE", "0")
+        extrator = ExtratorTrajetorias(camera_path, dispositivo=dispositivo)
+        inicio = time.monotonic()
+        ultima_atualizacao = inicio
+        quadros = 0
+        fps_processamento = metadata.get("processing_fps", 30)
+        fps_efetivo = min(fps_processamento, info.fps)
+        total = math.floor((info.total_quadros - 1) * fps_efetivo / info.fps + 1e-9) + 1 if info.total_quadros > 0 else None
+        metadata["progress"] = {"frames_processed": 0, "total_frames": total,
+                                "fps": None, "estimated_seconds_remaining": None}
+        save_metadata(folder, metadata)
+
+        def atualizar_progresso(instante, rastreamentos, posicoes):
+            nonlocal quadros, ultima_atualizacao
+            quadros += 1
+            agora = time.monotonic()
+            if agora - ultima_atualizacao < 2 and quadros != total:
+                return
+            decorrido = agora - inicio
+            fps = quadros / decorrido if decorrido > 0 else None
+            restante = max(0, total - quadros) / fps if total and fps else None
+            metadata["progress"] = {"frames_processed": quadros, "total_frames": total,
+                                    "fps": fps, "estimated_seconds_remaining": restante}
+            save_metadata(folder, metadata)
+            ultima_atualizacao = agora
+
+        trajetorias = extrator.processar(video_path, ao_processar_quadro=atualizar_progresso,
+                                         fps_processamento=fps_processamento)
+        result = {"unidades": "coordenadas normalizadas [-1, 1]; tempo em segundos",
+                  "trajetorias": [asdict(t) for t in trajetorias]}
+        (folder / "trajectories.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        metadata["status"] = "completed"
+    except Exception:
+        logger.exception("Falha ao processar submissão %s", metadata["id"])
+        metadata["status"] = "failed"
+        metadata["error"] = "Não foi possível calibrar ou processar o vídeo."
+    save_metadata(folder, metadata)
+
+
+@app.get("/api/submissions/{submission_id}")
+def get_submission(submission_id: str):
+    if len(submission_id) != 32 or any(c not in "0123456789abcdef" for c in submission_id):
+        raise HTTPException(404, "Submissão não encontrada.")
+    folder = storage_root() / submission_id
+    try:
+        metadata = json.loads((folder / "submission.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Submissão não encontrada.") from exc
+    response = {"id": submission_id, "status": metadata["status"],
+                "calibration_type": metadata["calibration_type"]}
+    if "progress" in metadata:
+        response["progress"] = metadata["progress"]
+    if metadata["status"] == "completed":
+        response.update(json.loads((folder / "trajectories.json").read_text(encoding="utf-8")))
+    elif metadata["status"] == "failed":
+        response["error"] = metadata["error"]
+    return response
+
+
 @app.post("/api/submissions", status_code=201)
 async def create_submission(
+    background_tasks: BackgroundTasks,
     video: Annotated[UploadFile, File()],
     calibration_type: Annotated[Literal["field", "camera"], Form()],
+    processing_fps: Annotated[int, Form()] = 30,
     field_data: Annotated[str | None, Form()] = None,
     camera: Annotated[UploadFile | None, File()] = None,
 ):
+    if processing_fps not in (15, 30, 60):
+        raise HTTPException(422, "A taxa de processamento deve ser 15, 30 ou 60 FPS.")
     suffix = Path(video.filename or "").suffix.lower()
     if suffix not in {".mp4", ".mov", ".webm", ".m4v"}:
         raise HTTPException(422, "Formato de vídeo não suportado.")
@@ -96,6 +188,7 @@ async def create_submission(
         metadata = {"id": submission_id, "video_filename": Path(video.filename or '').name,
                     "video_file": "video" + suffix, "video_size_bytes": size,
                     "calibration_type": calibration_type,
+                    "processing_fps": processing_fps,
                     "field_data": field.model_dump(exclude_none=True) if field else None,
                     "camera_file": "camera.yaml" if camera else None, "status": "received"}
         (staging / "submission.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -107,4 +200,5 @@ async def create_submission(
         await video.close()
         if camera:
             await camera.close()
+    background_tasks.add_task(process_submission, target)
     return {"id": submission_id, "status": "received", "calibration_type": calibration_type}
