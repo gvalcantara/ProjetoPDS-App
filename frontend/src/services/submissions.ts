@@ -1,7 +1,8 @@
-export async function sendSubmission(video: File, calibration: { type: 'field'; data: object } | { type: 'camera'; file: File }): Promise<string> {
+export async function sendSubmission(video: File, calibration: { type: 'field'; data: object } | { type: 'camera'; file: File }, processingFps: number): Promise<string> {
   const form = new FormData()
   form.append('video', video)
   form.append('calibration_type', calibration.type)
+  form.append('processing_fps', String(processingFps))
   if (calibration.type === 'field') form.append('field_data', JSON.stringify(calibration.data))
   else form.append('camera', calibration.file)
   const response = await fetch('/api/submissions', { method: 'POST', body: form })

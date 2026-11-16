@@ -38,9 +38,11 @@ Abra o endereço informado pelo Vite. Para acessar de outro dispositivo na rede,
 
 Selecione um vídeo e avance para a calibração. Pause no quadro desejado, capture-o e marque as quatro linhas externas com pelo menos dois pontos cada. A linha e o ponto centrais são opcionais; o ponto central requer a linha central. Use os controles de zoom e as barras de rolagem para inspecionar o quadro. As coordenadas são registradas em pixels da resolução original e acompanham o instante do quadro.
 
+Na calibração, escolha o início e o fim do trecho e a taxa de análise de 15, 30 ou 60 FPS. Ao selecionar apenas parte do vídeo, o navegador grava o trecho em tempo real antes do envio, usando WebM e MediaRecorder; mantenha a página aberta durante esse preparo. Se a taxa escolhida ultrapassar a taxa original, todos os quadros disponíveis serão processados. A compatibilidade de recorte depende do navegador.
+
 Também é possível selecionar um YAML de parâmetros de câmera previamente gerado. O botão de envio armazena o vídeo e os dados selecionados em `storage/<id>/`; configure `HATTRICK_STORAGE` para escolher outro diretório. Após receber os arquivos, o backend processa o vídeo em segundo plano. Para marcações, estima os parâmetros com o modelo radial e exige que a resolução corresponda à do vídeo. As marcações pressupõem câmera fixa.
 
-A API oferece `POST /api/submissions` com `multipart/form-data`: `video`, `calibration_type` (`field` ou `camera`) e, respectivamente, `field_data` (JSON com `width`, `height`, `frame_time_seconds` e `marks`) ou `camera` (arquivo YAML). A documentação interativa está em `http://127.0.0.1:8000/docs`.
+A API oferece `POST /api/submissions` com `multipart/form-data`: `video`, `calibration_type` (`field` ou `camera`), `processing_fps` (15, 30 ou 60; padrão 30) e, respectivamente, `field_data` (JSON com `width`, `height`, `frame_time_seconds` e `marks`) ou `camera` (arquivo YAML). O campo `video` já deve conter o trecho desejado. A documentação interativa está em `http://127.0.0.1:8000/docs`.
 
 Consulte `GET /api/submissions/<id>` para obter o estado (`received`, `processing`, `completed` ou `failed`). Quando concluído, a resposta inclui `trajetorias`, com IDs e posições em coordenadas normalizadas e tempo em segundos; em caso de falha, inclui `error`. O resultado também é salvo em `storage/<id>/trajectories.json`. O processamento em segundo plano depende do processo da API: se ele for interrompido, trabalhos pendentes não são retomados automaticamente.
 

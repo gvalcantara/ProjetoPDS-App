@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import logging
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -86,7 +87,9 @@ def process_submission(folder: Path):
         inicio = time.monotonic()
         ultima_atualizacao = inicio
         quadros = 0
-        total = info.total_quadros if info.total_quadros > 0 else None
+        fps_processamento = metadata.get("processing_fps", 30)
+        fps_efetivo = min(fps_processamento, info.fps)
+        total = math.floor((info.total_quadros - 1) * fps_efetivo / info.fps + 1e-9) + 1 if info.total_quadros > 0 else None
         metadata["progress"] = {"frames_processed": 0, "total_frames": total,
                                 "fps": None, "estimated_seconds_remaining": None}
         save_metadata(folder, metadata)
@@ -105,7 +108,8 @@ def process_submission(folder: Path):
             save_metadata(folder, metadata)
             ultima_atualizacao = agora
 
-        trajetorias = extrator.processar(video_path, ao_processar_quadro=atualizar_progresso)
+        trajetorias = extrator.processar(video_path, ao_processar_quadro=atualizar_progresso,
+                                         fps_processamento=fps_processamento)
         result = {"unidades": "coordenadas normalizadas [-1, 1]; tempo em segundos",
                   "trajetorias": [asdict(t) for t in trajetorias]}
         (folder / "trajectories.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -142,9 +146,12 @@ async def create_submission(
     background_tasks: BackgroundTasks,
     video: Annotated[UploadFile, File()],
     calibration_type: Annotated[Literal["field", "camera"], Form()],
+    processing_fps: Annotated[int, Form()] = 30,
     field_data: Annotated[str | None, Form()] = None,
     camera: Annotated[UploadFile | None, File()] = None,
 ):
+    if processing_fps not in (15, 30, 60):
+        raise HTTPException(422, "A taxa de processamento deve ser 15, 30 ou 60 FPS.")
     suffix = Path(video.filename or "").suffix.lower()
     if suffix not in {".mp4", ".mov", ".webm", ".m4v"}:
         raise HTTPException(422, "Formato de vídeo não suportado.")
@@ -181,6 +188,7 @@ async def create_submission(
         metadata = {"id": submission_id, "video_filename": Path(video.filename or '').name,
                     "video_file": "video" + suffix, "video_size_bytes": size,
                     "calibration_type": calibration_type,
+                    "processing_fps": processing_fps,
                     "field_data": field.model_dump(exclude_none=True) if field else None,
                     "camera_file": "camera.yaml" if camera else None, "status": "received"}
         (staging / "submission.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")

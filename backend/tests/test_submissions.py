@@ -39,6 +39,13 @@ def test_upload_camera(client, tmp_path):
     assert (tmp_path / response.json()['id'] / 'camera.yaml').read_bytes() == b'camera_model: radial'
 
 
+@pytest.mark.parametrize('fps', [15, 30, 60])
+def test_accepts_requested_processing_fps(client, tmp_path, fps):
+    response = client.post('/api/submissions', data={'calibration_type': 'camera', 'processing_fps': str(fps)}, files={'video': ('match.webm', b'video'), 'camera': ('camera.yaml', b'camera')})
+    assert response.status_code == 201
+    assert json.loads((tmp_path / response.json()['id'] / 'submission.json').read_text())['processing_fps'] == fps
+
+
 def test_rejects_out_of_bounds_and_empty_video(client, tmp_path):
     field = field_data()
     field['marks']['top'][1][0] = 100
@@ -52,6 +59,7 @@ def test_rejects_out_of_bounds_and_empty_video(client, tmp_path):
 def test_rejects_missing_or_conflicting_calibration(client):
     assert client.post('/api/submissions', data={'calibration_type': 'camera'}, files={'video': ('match.mp4', b'video')}).status_code == 422
     assert client.post('/api/submissions', data={'calibration_type': 'camera', 'field_data': '{}'}, files={'video': ('match.mp4', b'video'), 'camera': ('camera.yaml', b'x')}).status_code == 422
+    assert client.post('/api/submissions', data={'calibration_type': 'camera', 'processing_fps': '20'}, files={'video': ('match.mp4', b'video'), 'camera': ('camera.yaml', b'x')}).status_code == 422
 
 
 @pytest.mark.parametrize('kind', ['field', 'camera'])
@@ -61,7 +69,7 @@ def test_processes_submission_and_exposes_trajectories(client, tmp_path, monkeyp
         def __init__(self, path): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
-        def metadados(self): return SimpleNamespace(largura=100, altura=80, total_quadros=2)
+        def metadados(self): return SimpleNamespace(largura=100, altura=80, total_quadros=2, fps=30)
     class Calibrator:
         def conectar_linhas(self, marks): return marks
         def calibrar(self, marks, dimensions):
@@ -71,8 +79,9 @@ def test_processes_submission_and_exposes_trajectories(client, tmp_path, monkeyp
         def __init__(self, camera, dispositivo):
             assert dispositivo == '0'
             assert camera.read_text() in ('calibration', 'camera')
-        def processar(self, video, ao_processar_quadro):
+        def processar(self, video, ao_processar_quadro, fps_processamento):
             assert video.read_bytes() == b'video'
+            assert fps_processamento == 30
             ao_processar_quadro(0, [], [])
             ao_processar_quadro(.2, [], [])
             return [Trajetoria(7, [Posicao(0.0, .5, -.5)])]
