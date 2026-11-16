@@ -16,7 +16,7 @@ export async function sendSubmission(video: File, calibration: { type: 'field'; 
 
 export type Position = { instante: number; x: number; y: number }
 export type Trajectory = { id_rastreamento: number; posicoes: Position[] }
-export type Submission = { id: string; status: 'received' | 'processing' | 'completed' | 'failed'; trajetorias?: Trajectory[]; error?: string }
+export type Submission = { id: string; status: 'received' | 'processing' | 'completed' | 'failed'; trajetorias?: Trajectory[]; error?: string; progress?: { frames_processed: number; total_frames: number | null; fps: number | null; estimated_seconds_remaining: number | null } }
 
 export async function getSubmission(id: string, signal: AbortSignal): Promise<Submission> {
   const response = await fetch(`/api/submissions/${encodeURIComponent(id)}`, { signal })

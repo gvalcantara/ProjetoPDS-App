@@ -61,7 +61,7 @@ def test_processes_submission_and_exposes_trajectories(client, tmp_path, monkeyp
         def __init__(self, path): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
-        def metadados(self): return SimpleNamespace(largura=100, altura=80)
+        def metadados(self): return SimpleNamespace(largura=100, altura=80, total_quadros=2)
     class Calibrator:
         def conectar_linhas(self, marks): return marks
         def calibrar(self, marks, dimensions):
@@ -71,8 +71,10 @@ def test_processes_submission_and_exposes_trajectories(client, tmp_path, monkeyp
         def __init__(self, camera, dispositivo):
             assert dispositivo == '0'
             assert camera.read_text() in ('calibration', 'camera')
-        def processar(self, video):
+        def processar(self, video, ao_processar_quadro):
             assert video.read_bytes() == b'video'
+            ao_processar_quadro(0, [], [])
+            ao_processar_quadro(.2, [], [])
             return [Trajetoria(7, [Posicao(0.0, .5, -.5)])]
     monkeypatch.setattr(main, 'LeitorVideo', Video)
     monkeypatch.setattr(main, 'CalibradorCampo', Calibrator)
@@ -85,11 +87,20 @@ def test_processes_submission_and_exposes_trajectories(client, tmp_path, monkeyp
     assert response.status_code == 201
     result = client.get('/api/submissions/' + response.json()['id']).json()
     assert result['status'] == 'completed'
+    assert result['progress']['frames_processed'] == 2
+    assert result['progress']['total_frames'] == 2
+    assert result['progress']['estimated_seconds_remaining'] == 0
     assert result['trajetorias'] == [{'id_rastreamento': 7, 'posicoes': [{'instante': 0.0, 'x': .5, 'y': -.5}]}]
 
 
 def test_processing_failure_and_unknown_submission(client, monkeypatch):
     monkeypatch.setattr(main, 'process_submission', real_process_submission)
+    class Video:
+        def __init__(self, path): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def metadados(self): return SimpleNamespace(largura=100, altura=80, total_quadros=0)
+    monkeypatch.setattr(main, 'LeitorVideo', Video)
     class Extractor:
         def __init__(self, camera, dispositivo): raise ValueError('invalid calibration')
     monkeypatch.setattr(main, 'ExtratorTrajetorias', Extractor)
