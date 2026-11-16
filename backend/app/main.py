@@ -1,12 +1,15 @@
 import json
 import os
 import shutil
+import logging
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, model_validator
+from hattrick_ai import CalibradorCampo, ExtratorTrajetorias, LeitorVideo
 
 
 class FieldMarks(BaseModel):
@@ -42,6 +45,7 @@ class FieldData(BaseModel):
 
 
 app = FastAPI(title="Hattrick API", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 def storage_root() -> Path:
@@ -53,8 +57,63 @@ def health():
     return {"status": "ok"}
 
 
+def save_metadata(folder: Path, metadata: dict):
+    temporary = folder / "submission.json.tmp"
+    temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(folder / "submission.json")
+
+
+def process_submission(folder: Path):
+    metadata = json.loads((folder / "submission.json").read_text(encoding="utf-8"))
+    try:
+        metadata["status"] = "processing"
+        save_metadata(folder, metadata)
+        video_path = folder / metadata["video_file"]
+        camera_path = folder / "camera.yaml"
+        if metadata["calibration_type"] == "field":
+            field = metadata["field_data"]
+            with LeitorVideo(video_path) as video:
+                info = video.metadados()
+                if (field["width"], field["height"]) != (info.largura, info.altura):
+                    raise ValueError("A resolução das marcações não corresponde à do vídeo.")
+            calibrador = CalibradorCampo()
+            marks = calibrador.conectar_linhas(field["marks"])
+            calibrador.calibrar(marks, (info.largura, info.altura)).salvar(camera_path)
+            metadata["camera_file"] = "camera.yaml"
+        dispositivo = os.environ.get("HATTRICK_DEVICE", "0")
+        trajetorias = ExtratorTrajetorias(camera_path, dispositivo=dispositivo).processar(video_path)
+        result = {"unidades": "coordenadas normalizadas [-1, 1]; tempo em segundos",
+                  "trajetorias": [asdict(t) for t in trajetorias]}
+        (folder / "trajectories.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        metadata["status"] = "completed"
+    except Exception:
+        logger.exception("Falha ao processar submissão %s", metadata["id"])
+        metadata["status"] = "failed"
+        metadata["error"] = "Não foi possível calibrar ou processar o vídeo."
+    save_metadata(folder, metadata)
+
+
+@app.get("/api/submissions/{submission_id}")
+def get_submission(submission_id: str):
+    if len(submission_id) != 32 or any(c not in "0123456789abcdef" for c in submission_id):
+        raise HTTPException(404, "Submissão não encontrada.")
+    folder = storage_root() / submission_id
+    try:
+        metadata = json.loads((folder / "submission.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Submissão não encontrada.") from exc
+    response = {"id": submission_id, "status": metadata["status"],
+                "calibration_type": metadata["calibration_type"]}
+    if metadata["status"] == "completed":
+        response.update(json.loads((folder / "trajectories.json").read_text(encoding="utf-8")))
+    elif metadata["status"] == "failed":
+        response["error"] = metadata["error"]
+    return response
+
+
 @app.post("/api/submissions", status_code=201)
 async def create_submission(
+    background_tasks: BackgroundTasks,
     video: Annotated[UploadFile, File()],
     calibration_type: Annotated[Literal["field", "camera"], Form()],
     field_data: Annotated[str | None, Form()] = None,
@@ -107,4 +166,5 @@ async def create_submission(
         await video.close()
         if camera:
             await camera.close()
+    background_tasks.add_task(process_submission, target)
     return {"id": submission_id, "status": "received", "calibration_type": calibration_type}

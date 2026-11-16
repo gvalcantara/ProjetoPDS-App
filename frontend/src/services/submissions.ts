@@ -13,3 +13,13 @@ export async function sendSubmission(video: File, calibration: { type: 'field'; 
   const result: { id: string } = await response.json()
   return result.id
 }
+
+export type Position = { instante: number; x: number; y: number }
+export type Trajectory = { id_rastreamento: number; posicoes: Position[] }
+export type Submission = { id: string; status: 'received' | 'processing' | 'completed' | 'failed'; trajetorias?: Trajectory[]; error?: string }
+
+export async function getSubmission(id: string, signal: AbortSignal): Promise<Submission> {
+  const response = await fetch(`/api/submissions/${encodeURIComponent(id)}`, { signal })
+  if (!response.ok) throw new Error('Não foi possível consultar o processamento. Tente novamente.')
+  return response.json() as Promise<Submission>
+}
