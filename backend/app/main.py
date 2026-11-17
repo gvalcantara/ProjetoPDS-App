@@ -83,7 +83,7 @@ def process_submission(folder: Path):
             calibrador.calibrar(marks, (info.largura, info.altura)).salvar(camera_path)
             metadata["camera_file"] = "camera.yaml"
         dispositivo = os.environ.get("HATTRICK_DEVICE", "0")
-        extrator = ExtratorTrajetorias(camera_path, dispositivo=dispositivo)
+        extrator = ExtratorTrajetorias(camera_path, dispositivo=dispositivo, confianca=0.6)
         inicio = time.monotonic()
         ultima_atualizacao = inicio
         quadros = 0
